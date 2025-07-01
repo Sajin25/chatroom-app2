@@ -18,9 +18,7 @@ import { auth } from "../firebase-config";
 
 import "../App.css";
 
-const APP_ID = "chat-app-a86cb";
-
-export const Chat = ({ room, user }) => {
+const Chat = ({ room, user }) => {
   const [newMessage, setNewMessage] = useState("");
   const [messages, setMessages] = useState([]);
   const [showEmojiPicker, setShowEmojiPicker] = useState(false);
@@ -28,8 +26,8 @@ export const Chat = ({ room, user }) => {
   const messagesEndRef = useRef(null);
   const typingTimeoutRef = useRef(null);
 
-  const messagesRef = collection(db, "artifacts", APP_ID, "public", "data", "chatRooms", room, "messages");
-  const typingStatusRef = collection(db, "artifacts", APP_ID, "public", "data", "chatRooms", room, "typingStatus");
+  const messagesRef = collection(db, "chatRooms", room, "messages");
+  const typingStatusRef = collection(db, "chatRooms", room, "typingStatus");
   const currentUserId = auth.currentUser?.uid;
 
   useEffect(() => {
@@ -39,9 +37,11 @@ export const Chat = ({ room, user }) => {
       setMessages(loadedMessages);
     });
     return () => unsubscribe();
-  }, [room]);
+  }, [room, messagesRef]);
 
   useEffect(() => {
+    if (!currentUserId) return;
+
     const unsubscribeTyping = onSnapshot(typingStatusRef, (snapshot) => {
       const typers = {};
       snapshot.docs.forEach((doc) => {
@@ -52,14 +52,20 @@ export const Chat = ({ room, user }) => {
       });
       setActiveTypers(typers);
     });
+
     return () => {
-      if (currentUserId) {
+      const cleanupTypingStatus = async () => {
         const userTypingDocRef = doc(typingStatusRef, currentUserId);
-        setDoc(userTypingDocRef, { user: user, lastTyped: 0, uid: currentUserId });
-      }
+        await setDoc(userTypingDocRef, {
+          user: user,
+          lastTyped: 0,
+          uid: currentUserId
+        }, { merge: true });
+      };
+      cleanupTypingStatus();
       unsubscribeTyping();
     };
-  }, [room, currentUserId, user]);
+  }, [room, currentUserId, user, typingStatusRef]);
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -67,18 +73,31 @@ export const Chat = ({ room, user }) => {
 
   const handleNewMessageChange = async (e) => {
     setNewMessage(e.target.value);
-    if (currentUserId) {
-      const userTypingDocRef = doc(typingStatusRef, currentUserId);
-      if (typingTimeoutRef.current) clearTimeout(typingTimeoutRef.current);
+    if (!currentUserId) return;
 
-      if (e.target.value.trim().length > 0) {
-        await setDoc(userTypingDocRef, { user: user, lastTyped: Date.now(), uid: currentUserId });
-        typingTimeoutRef.current = setTimeout(async () => {
-          await setDoc(userTypingDocRef, { user: user, lastTyped: 0, uid: currentUserId });
-        }, 1500);
-      } else {
-        await setDoc(userTypingDocRef, { user: user, lastTyped: 0, uid: currentUserId });
-      }
+    const userTypingDocRef = doc(typingStatusRef, currentUserId);
+    if (typingTimeoutRef.current) clearTimeout(typingTimeoutRef.current);
+
+    if (e.target.value.trim().length > 0) {
+      await setDoc(userTypingDocRef, {
+        user: user,
+        lastTyped: Date.now(),
+        uid: currentUserId
+      }, { merge: true });
+
+      typingTimeoutRef.current = setTimeout(async () => {
+        await setDoc(userTypingDocRef, {
+          user: user,
+          lastTyped: 0,
+          uid: currentUserId
+        }, { merge: true });
+      }, 1500);
+    } else {
+      await setDoc(userTypingDocRef, {
+        user: user,
+        lastTyped: 0,
+        uid: currentUserId
+      }, { merge: true });
     }
   };
 
@@ -101,7 +120,11 @@ export const Chat = ({ room, user }) => {
     if (currentUserId) {
       clearTimeout(typingTimeoutRef.current);
       const userTypingDocRef = doc(typingStatusRef, currentUserId);
-      await setDoc(userTypingDocRef, { user: user, lastTyped: 0, uid: currentUserId });
+      await setDoc(userTypingDocRef, {
+        user: user,
+        lastTyped: 0,
+        uid: currentUserId
+      }, { merge: true });
     }
   };
 
@@ -123,9 +146,13 @@ export const Chat = ({ room, user }) => {
   };
 
   const handleDeleteMessage = async (messageId, messageCreatedAt, messageUserUid) => {
-    const fiveMinutesAgo = Date.now() - 5 * 60 * 1000;
-    const messageTime = messageCreatedAt?.seconds * 1000;
-    if (currentUserId === messageUserUid && messageTime > fiveMinutesAgo) {
+    if (!messageCreatedAt?.seconds) return;
+
+    const fiveMinutesInMs = 5 * 60 * 1000;
+    const messageTime = messageCreatedAt.seconds * 1000;
+    const currentTime = Date.now();
+
+    if (currentUserId === messageUserUid && (currentTime - messageTime) <= fiveMinutesInMs) {
       if (window.confirm("Are you sure you want to delete this message?")) {
         try {
           const messageDocRef = doc(messagesRef, messageId);
@@ -180,8 +207,14 @@ export const Chat = ({ room, user }) => {
         <div ref={messagesEndRef} />
       </div>
 
-      {otherTypers.length > 0 && <div className="typing-indicator">{otherTypers.join(", ")} {otherTypers.length === 1 ? "is" : "are"} typing...</div>}
-      {otherTypers.length === 0 && newMessage.trim() && <div className="typing-indicator typing-self">✍️ You are typing...</div>}
+      {otherTypers.length > 0 && (
+        <div className="typing-indicator">
+          {otherTypers.join(", ")} {otherTypers.length === 1 ? "is" : "are"} typing...
+        </div>
+      )}
+      {otherTypers.length === 0 && newMessage.trim() && (
+        <div className="typing-indicator typing-self">✍️ You are typing...</div>
+      )}
 
       <form onSubmit={handleSubmit} className="new-message-form">
         <input
@@ -196,7 +229,11 @@ export const Chat = ({ room, user }) => {
             }
           }}
         />
-        <button type="button" className="emoji-button" onClick={() => setShowEmojiPicker((prev) => !prev)}>
+        <button
+          type="button"
+          className="emoji-button"
+          onClick={() => setShowEmojiPicker((prev) => !prev)}
+        >
           😀
         </button>
         <button type="submit" className="send-button">
@@ -204,7 +241,13 @@ export const Chat = ({ room, user }) => {
         </button>
       </form>
 
-      {showEmojiPicker && <div className="emoji-picker-container"><Picker data={data} onEmojiSelect={handleEmojiSelect} /></div>}
+      {showEmojiPicker && (
+        <div className="emoji-picker-container">
+          <Picker data={data} onEmojiSelect={handleEmojiSelect} />
+        </div>
+      )}
     </div>
   );
 };
+
+export default Chat;
